@@ -17,17 +17,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from datetime import datetime
+import click
 import gzip
 import json
-from multiprocessing import pool
 import os
-from os import path
+import pickle
+import requests
 import time
 
-import click
+
+from datetime import datetime
+from multiprocessing import pool
+from os import path
+from urllib.parse import urlparse
+
 from django.utils import timezone
-import requests
 
 from clearcode import cdutils
 
@@ -226,17 +230,143 @@ def file_saver(content, blob_path, output_dir, **kwargs):
     return len(compressed)
 
 
+def construct_file_tree(package_hash: str, package_data: dict) -> List[dict]:
+    """ """
+    file_tree = []
+
+    # Add the root file for the package itself
+    file_tree.append({
+        'firmware_hash': package_hash,
+        'file_hash': package_hash,
+        'file_full_path': '/',
+        'file_name': '',
+        # FIXME: We don't know the size of the compressed package. This would be
+        # nice to have, but we're not sure where that comes from.
+        'file_size': 0,
+        # FIXME
+        # The package_data we're passing in right now does not include
+        # the mime-type. Hand-wave and say that it's text/plain regardless
+        # of what we're looking at.
+        # The mime type information can be found in the scancode document
+        # for a given package.
+        'file_type_mime': 'text/plain',
+        'file_type_full': 'ClearlyDefined Unknown'
+    })
+
+    # Add entries for each file in the package
+    for file_entry in package_data['files']:
+        # In the ClearlyDefined dataset, all paths are relative
+        # with the root appearing as cwd. Instead, we should add a /
+        # to the start of each of the dirents so that it conforms to
+        # finitestate standards where the top level of the extracted
+        # package is root.
+        file_path = f"/{file_entry['path']}"
+        file_tree.append({
+            'firmware_hash': package_hash,
+            'file_hash': file_entry['hashes']['sha256'],
+            'file_full_path': file_path,
+            'file_name': os.path.basename(file_path),
+            # FIXME: We don't know the size of the files. It would be nice to know
+            # that later. That comes from the scancode document for a package.
+            'file_size': 0
+            # FIXME
+            # The package_data we're passing in right now does not include
+            # the mime-type. Hand-wave and say that it's text/plain regardless
+            # of what we're looking at.
+            # The mime type information can be found in the scancode document
+            # for a given package.
+            'file_type_mime': 'text/plain',
+            'file_type_full': 'ClearlyDefined Unknown',
+        })
+
+    return file_tree
+
+
+def construct_ground_truth_upload_metadata(package_hash: str, package_data: dict) -> dict:
+    package_url = package_data['registryData']['dist']['tarball']
+    package_filename = os.path.basename(package_url)
+    package_url_parsed = urlparse(packageurl)
+    supplier_base_url = f'{package_url_parsed.scheme}://{package_url_parsed.netloc}/'
+
+    return {
+        'additional_metadata': {
+            'upload_date': package_data['registryData']['releaseDate'],
+            'license': package_data['registryData']['license'],
+            'project_name': package_data['registryData']['name'],
+            'home_page': package_data['registryData']['homepage'],
+            'file_count': package_data['registryData']['manifest']['dist']['fileCount'],
+            'description': package_data['registryData']['manifest']['description'],
+            'package_version': package_data['registryData']['manifest']['version']
+        },
+        'download_date': str(datetime.utcnow()),
+        'download_location': package_url,
+        'download_type': "clearlydefined-harvest",
+        'download_method': "clearlydefined-scraper-npm",
+        'file_name': package_filename,
+        'supplier_base_url': supplier_base_url,
+        'supplier_name': "npm",
+        'file_hash': package_hash
+    }
+
+
+def upload_package_json(file_tree: dict, data: dict):
+    package_json_sha256_digest = str()
+    for file in file_tree:
+        # Look for a package.json either exactly at the root of the package
+        # or a single directory down.
+        # This regex captures paths of the form
+        # /package.json
+        # /arbitrary-string/package.json
+        # and nothing else.
+        if re.match(r'^(\/[^\/]*)?\/package.json', file['file_full_path']):
+            package_json_sha256_digest = file['file_hash']
+
+    package_json_string: str = json.dumps(data["package.json"], indent=True)
+
+    # TODO: Upload package.json to the files bucket
+    # with filename package_json_sha256_digest
+    # and send SQS message to package metadata plugin to handle
+    # this package
+
+
+# Other stuff:
+# - If any of our three required items are missing:
+#   - file_tree
+#   - ground_truth_upload_metadata
+#   - package.json
+#   we need to do nothing interesting, because it will 'splode
+#   the package metadata plugin downstream.
+
 def finitestate_saver(content, blob_path, **kwargs):
     output_folder = kwargs['output_dir']
     if isinstance(content, str):
         data = json.load(content)
     else:
         data = content
-    global global_counter
-    global_counter += 1
-    with open(f'{output_folder}/{global_counter}.json', 'w') as file_handle:
-        json.dump(data, file_handle, indent=3)
+    # global global_counter
 
+    if not os.path.isdir(output_folder):
+        os.makedirs(output_folder)
+    if output_folder == 'harvests' and data['_metadata']['type'] == 'npm':
+        file_tree = dict()  # check
+        ground_truth_upload_metadata = dict()  # check
+        raw_package_json = dict()  # check
+        package_name: str = data['registryData']['manifest']['name']
+        package_version: str = data['registryData']['manifest']['version']
+        output_filename: str = f'{package_name}_{package_version}.json'
+
+        package_hash: str = data['summaryInfo']['hashes']['sha256']
+        file_tree = construct_file_tree(package_hash, data)
+        ground_truth_upload_metadata: dict = construct_ground_truth_upload_metadata(package_hash, data)
+
+        # TODO save the file_tree
+
+        with open(f'{output_folder}/{output_filename}', 'w') as file_handle:
+            json.dump(data, file_handle, indent=3)
+    # else:
+    #     global_counter += 1
+    #     with open(f'{output_folder}/{global_counter}.json', 'w') as file_handle:
+    #         json.dump(data, file_handle, indent=3)
 
 
 def db_saver(content, blob_path, **kwargs):
@@ -340,9 +470,9 @@ class Cache(object):
     A caching object for etags and checksums to avoid refetching things.
     """
 
-    def __init__(self, max_size=100 * 1000):
-        self.etags_cache = {}
-        self.checksums_cache = {}
+    def __init__(self, max_size=100 * 1000 * 1000):
+        self.etags_cache = dict()
+        self.checksums_cache = dict()
         self.max_size = max_size
 
     def is_unchanged_remotely(self, url, session=session):
@@ -357,6 +487,19 @@ class Cache(object):
                 return True
         except:
             return False
+
+    @classmethod
+    def local_cache_exists(cls):
+        return os.path.isfile('.cache')
+
+    def dump_to_disk(self):
+        with open('.cache', 'wb') as file_handle:
+            pickle.dump(self, file_handle)
+
+    @classmethod
+    def load_from_disk(cls):
+        with open('.cache', 'rb') as file_handle:
+            return cls(pickle.load(file_handle))
 
     def is_fetched(self, checksum, url):
         """
@@ -496,7 +639,11 @@ def cli(output_dir=None, save_to_db=False, save_to_fstate=False,
     coordinate = None
     file_path = None
 
-    cache = Cache(max_size=100 * 1000)
+    cache = None
+    if Cache.local_cache_exists():
+        cache = Cache.load_from_disk()
+    else:
+        cache = Cache(max_size=10 * 1000 * 1000)
 
     sleeping = False
     harvest_fetchers = None
@@ -601,6 +748,9 @@ def cli(output_dir=None, save_to_db=False, save_to_fstate=False,
         if harvest_fetchers:
             harvest_fetchers.close()
             harvest_fetchers.terminate()
+
+        print("Dumping cache to disk at .cache, please wait...")
+        cache.dump_to_disk()
 
         print('TOTAL cycles:', cycles,
               'with:', total_defs_count, 'defs and combined harvests,',
