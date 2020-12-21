@@ -59,8 +59,10 @@ update. We use etags and a cache to avoid refetching things that have not
 changed.
 """
 
-TRACE = False
+# TRACE = False
+TRACE = True
 
+global_counter = 0
 
 # TODO: update when this is updated upstream
 # https://github.com/clearlydefined/service/blob/master/schemas/definition-1.0.json#L17
@@ -68,17 +70,17 @@ known_types = (
     # fake empty type
     None,
     'npm',
-    'git',
-    'pypi',
-    'composer',
-    'maven',
-    'gem',
-    'nuget',
-    'sourcearchive',
-    'deb',
-    'debsrc',
-    'crate',
-    'pod',
+    # 'git',
+    # 'pypi',
+    # 'composer',
+    # 'maven',
+    # 'gem',
+    # 'nuget',
+    # 'sourcearchive',
+    # 'deb',
+    # 'debsrc',
+    # 'crate',
+    # 'pod',
 )
 
 
@@ -88,7 +90,7 @@ session = requests.Session()
 
 def fetch_and_save_latest_definitions(
         base_api_url, cache, output_dir=None, save_to_db=False,
-        by_latest=True, retries=2, verbose=True):
+        save_to_fstate=False, by_latest=True, retries=2, verbose=True):
     """
     Fetch ClearlyDefined definitions and paginate through. Save these as blobs
     to data_dir.
@@ -97,7 +99,7 @@ def fetch_and_save_latest_definitions(
     Otherwise, the order is not specified.
     NOTE: these do not contain file details (but the harvest do)
     """
-    assert output_dir or save_to_db, 'You must select one of the --output-dir or --save-to-db options.'
+    assert output_dir or save_to_db or save_to_fstate, 'You must select one of the --output-dir or --save-to-db or save_to_fstate options.'
 
     if save_to_db:
         from clearcode import dbconf
@@ -127,6 +129,9 @@ def fetch_and_save_latest_definitions(
             savers.append(db_saver)
         if output_dir:
             savers.append(file_saver)
+        if save_to_fstate:
+            output_dir = 'definitions'
+            savers.append(finitestate_saver)
 
         # we received a batch of definitions: let's save each as a Gzipped JSON
         for definition in definitions:
@@ -221,6 +226,19 @@ def file_saver(content, blob_path, output_dir, **kwargs):
     return len(compressed)
 
 
+def finitestate_saver(content, blob_path, **kwargs):
+    output_folder = kwargs['output_dir']
+    if isinstance(content, str):
+        data = json.load(content)
+    else:
+        data = content
+    global global_counter
+    global_counter += 1
+    with open(f'{output_folder}/{global_counter}.json', 'w') as file_handle:
+        json.dump(data, file_handle, indent=3)
+
+
+
 def db_saver(content, blob_path, **kwargs):
     """
     Save `content` bytes (or dict or string) identified by `file_path` to the
@@ -271,15 +289,15 @@ def save_harvest(
 
 
 def fetch_and_save_harvests(
-        coordinate, cache, output_dir=None, save_to_db=False, retries=2,
-        session=session, verbose=True):
+        coordinate, cache, output_dir=None, save_to_db=False,
+        save_to_fstate=False, retries=2, session=session, verbose=True):
     """
     Fetch all the harvests for `coordinate` Coordinate object and save them in
     `outputdir` using blob-style paths, one file for each harvest/scan.
 
     (Note: Return a tuple of (etag, md5, url) for usage as a callback)
     """
-    assert output_dir or save_to_db, 'You must select one of the --output-dir or --save-to-db options.'
+    assert output_dir or save_to_db or save_to_fstate, 'You must select one of the --output-dir or --save-to-db or --save_to_fstate options.'
     if save_to_db:
         from clearcode import dbconf
         dbconf.configure(verbose=verbose)
@@ -294,6 +312,9 @@ def fetch_and_save_harvests(
             savers.append(db_saver)
         if output_dir:
             savers.append(file_saver)
+        if save_to_fstate:
+            output_dir = 'harvests'
+            savers.append(finitestate_saver)
 
         if verbose:
             print('  Fetched harvest for:', coordinate.to_api_path(), flush=True)
@@ -410,6 +431,10 @@ class Cache(object):
     is_flag=True,
     help='Save fetched content as compressed gzipped blobs in the configured database.')
 
+@click.option('--save-to-fstate',
+    is_flag=True,
+    help='Save fetched content to Finite State data repositories.')
+
 @click.option('--unsorted',
     is_flag=True,
     help='Fetch data without any sorting. The default is to fetch data sorting by latest updated first.')
@@ -450,7 +475,7 @@ class Cache(object):
     help='Display more verbose progress messages.')
 
 @click.help_option('-h', '--help')
-def cli(output_dir=None, save_to_db=False,
+def cli(output_dir=None, save_to_db=False, save_to_fstate=False,
         base_api_url='https://api.clearlydefined.io',
         wait=60, processes=1, unsorted=False,
         log_file=None, max_def=0, only_definitions=False, session=session,
@@ -460,7 +485,7 @@ def cli(output_dir=None, save_to_db=False,
     as gzipped JSON either as as files in output-dir or in a PostgreSQL
     database. Loop forever after waiting some seconds between each cycles.
     """
-    assert output_dir or save_to_db, 'You must select at least one of the --output-dir or --save-to-db options.'
+    assert output_dir or save_to_db or save_to_fstate, 'You must select at least one of the --output-dir or --save-to-db or --save-to-fstate options.'
 
     fetch_harvests = not only_definitions
 
@@ -507,6 +532,7 @@ def cli(output_dir=None, save_to_db=False,
                     base_api_url=def_api_url,
                     output_dir=output_dir,
                     save_to_db=save_to_db,
+                    save_to_fstate=save_to_fstate,
                     cache=cache,
                     by_latest=not unsorted,
                     verbose=verbose)
@@ -525,6 +551,7 @@ def cli(output_dir=None, save_to_db=False,
                             coordinate=coordinate,
                             output_dir=output_dir,
                             save_to_db=save_to_db,
+                            save_to_fstate=save_to_fstate,
                             # that's a copy of the cache, since we are in some
                             # subprocess, the data is best not shared to avoid
                             # any sync issue
