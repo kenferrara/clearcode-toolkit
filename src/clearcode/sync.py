@@ -35,7 +35,8 @@ from django.utils import timezone
 
 from clearcode import cdutils
 
-from clearcode.finitestate import construct_file_tree, construct_ground_truth_upload_metadata, get_package_json
+from clearcode.finitestate.fs_clearcode import construct_file_tree, construct_ground_truth_upload_metadata, get_package_json
+from clearcode.finitestate.storage.aws_adapter import FSAWSStorageAdapter
 
 
 """
@@ -66,8 +67,9 @@ changed.
 """
 
 TRACE = False
-
-global_counter = 0
+FILE_BUCKET = "finitestate-software-component-dev2-scraper"
+METADATA_BUCKET = "finitestate-software-component-dev2-scraper"
+fs_storage_adapter = FSAWSStorageAdapter(FILE_BUCKET, METADATA_BUCKET)
 
 # TODO: update when this is updated upstream
 # https://github.com/clearlydefined/service/blob/master/schemas/definition-1.0.json#L17
@@ -283,7 +285,13 @@ def finitestate_saver(content, blob_path, **kwargs):
 
         package_json_data: dict = get_package_json(file_tree, data)
 
-        write_jsonl_to_s3("file_tree", output_filename, file_tree)
+        print("Writing file tree to S3")
+        try:
+            fs_storage_adapter.store_metadata(file_id=package_hash, output_location="file_tree", result=file_tree)
+        except Exception as e:
+            print(f"Error: {e}")
+
+        # write_jsonl_to_s3("file_tree", output_filename, file_tree)
         write_jsonl_to_s3("ground_truth_upload_metadata", output_filename, ground_truth_upload_metadata)
         write_jsonl_to_s3("package_jsons", output_filename, package_json_data["package_json"])
 
