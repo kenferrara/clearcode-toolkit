@@ -4,7 +4,7 @@
 #
 #    pip-compile devops-requirements.in
 #
-ansible==2.9.9            # via -r devops-requirements.in
+ansible==2.10.0            # via -r devops-requirements.in
 cffi==1.14.0              # via cryptography
 cryptography==2.9.2       # via ansible
 jinja2==2.11.2            # via ansible
